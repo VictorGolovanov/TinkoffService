@@ -1,6 +1,5 @@
 package com.victorgolovanov.TinkoffService.service;
 
-import com.victorgolovanov.TinkoffService.exception.PriceNotFoundException;
 import com.victorgolovanov.TinkoffService.exception.StockNotfoundException;
 import com.victorgolovanov.TinkoffService.model.Currency;
 import com.victorgolovanov.TinkoffService.model.Stock;
@@ -51,6 +50,7 @@ public class TinkoffStockService implements StockService {
         List<CompletableFuture<MarketInstrumentList>> marketInstruments = new ArrayList<>();
         tickers.getTickers().forEach(ticker -> marketInstruments.add(getMarketInstrumentTicker(ticker)));
         List<Stock> stocks = marketInstruments.stream()
+                // wait while all requests are done
                 .map(CompletableFuture::join)
                 .map(mi -> {
                     if (!mi.getInstruments().isEmpty()) {
@@ -71,20 +71,27 @@ public class TinkoffStockService implements StockService {
         return new StocksDto(stocks);
     }
 
-    public StockPrice getStockPrice(String figi) {
+    @Async
+    public CompletableFuture<Optional<Orderbook>> getOrderBookByFigi(String figi) {
         CompletableFuture<Optional<Orderbook>> orderBook = openApi.getMarketContext().getMarketOrderbook(figi, 0);
-        if (orderBook.join().isPresent()) {
-            return new StockPrice(figi, orderBook.join().get().getLastPrice());
-        }
-        throw new PriceNotFoundException(String.format("Price for figi %S not found.", figi));
+        log.info("Getting price {} from Tinkoff", figi);
+        return orderBook;
     }
 
     @Override
     public StocksPricesDto getStocksPrices(FigiesDto figies) {
         long start = System.currentTimeMillis();
-        List<StockPrice> stockPrices = figies.getFigies().stream()
-                .map(this::getStockPrice).collect(Collectors.toList());
-        log.info("Time - {}", System.currentTimeMillis() - start);
-        return new StocksPricesDto(stockPrices);
+        List<CompletableFuture<Optional<Orderbook>>> orderBooks = new ArrayList<>();
+        figies.getFigies().forEach(figi -> orderBooks.add(getOrderBookByFigi(figi)));
+        List<StockPrice> prices = orderBooks.stream()
+                // wait while all requests are done
+                .map(CompletableFuture::join)
+                .map(ob -> ob.orElseThrow(() -> new StockNotfoundException("Stock not found ")))
+                .map(ob -> new StockPrice(
+                        ob.getFigi(),
+                        ob.getLastPrice()
+                )).collect(Collectors.toList());
+        log.info("Time - {} ", System.currentTimeMillis() - start);
+        return new StocksPricesDto(prices);
     }
 }
